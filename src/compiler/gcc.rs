@@ -158,7 +158,7 @@ counted_array!(pub static ARGS: [ArgInfo<ArgData>; _] = [
     take_arg!("-L", OsString, Separated, PassThrough),
     flag!("-M", TooHardFlag),
     flag!("-MD", NeedDepTarget),
-    take_arg!("-MF", PathBuf, Separated, DepArgumentPath),
+    take_arg!("-MF", PathBuf, CanBeSeparated, DepArgumentPath),
     flag!("-MM", TooHardFlag),
     flag!("-MMD", NeedDepTarget),
     flag!("-MP", NeedDepTarget),
