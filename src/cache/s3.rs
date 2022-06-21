@@ -13,46 +13,46 @@
 // limitations under the License.
 
 use crate::cache::{Cache, CacheRead, CacheWrite, Storage};
-use crate::simples3::{
-    AutoRefreshingProvider, Bucket, ChainProvider, ProfileProvider, ProvideAwsCredentials, Ssl,
-};
-use directories::UserDirs;
+use aws_config::meta::region::RegionProviderChain;
+use aws_sdk_s3::{Client, Region};
 use std::io;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::runtime::Runtime;
 
 use crate::errors::*;
 
 /// A cache that stores entries in Amazon S3.
 pub struct S3Cache {
+    /// The S3 client.
+    client: Arc<Client>,
     /// The S3 bucket.
-    bucket: Arc<Bucket>,
-    /// Credentials provider.
-    provider: AutoRefreshingProvider<ChainProvider>,
+    bucket: String,
     /// Prefix to be used for bucket keys.
     key_prefix: String,
 }
 
 impl S3Cache {
     /// Create a new `S3Cache` storing data in `bucket`.
-    pub fn new(bucket: &str, endpoint: &str, use_ssl: bool, key_prefix: &str) -> Result<S3Cache> {
-        let user_dirs = UserDirs::new().context("Couldn't get user directories")?;
-        let home = user_dirs.home_dir();
+    pub fn new(
+        bucket: &str,
+        region: Option<String>,
+        _endpoint: &str,
+        _use_ssl: bool,
+        key_prefix: &str,
+    ) -> Result<S3Cache> {
+        let runtime = Runtime::new()?;
+        let bucket = bucket.to_owned();
+        let region_provider = RegionProviderChain::first_try(region.map(Region::new))
+            .or_default_provider()
+            .or_else(Region::new("us-west-2"));
 
-        let profile_providers = vec![
-            ProfileProvider::with_configuration(home.join(".aws").join("credentials"), "default"),
-            //TODO: this is hacky, this is where our mac builders store their
-            // credentials. We should either match what boto does more directly
-            // or make those builders put their credentials in ~/.aws/credentials
-            ProfileProvider::with_configuration(home.join(".boto"), "Credentials"),
-        ];
-        let provider =
-            AutoRefreshingProvider::new(ChainProvider::with_profile_providers(profile_providers));
-        let ssl_mode = if use_ssl { Ssl::Yes } else { Ssl::No };
-        let bucket = Arc::new(Bucket::new(bucket, endpoint, ssl_mode)?);
+        let shared_config = runtime.block_on(aws_config::from_env().region(region_provider).load());
+        let client = Arc::new(Client::new(&shared_config));
+
         Ok(S3Cache {
+            client,
             bucket,
-            provider,
             key_prefix: key_prefix.to_owned(),
         })
     }
@@ -74,17 +74,25 @@ impl Storage for S3Cache {
     async fn get(&self, key: &str) -> Result<Cache> {
         let key = self.normalize_key(key);
 
-        let credentials = self.provider.credentials().await;
-        let result = match credentials {
-            Ok(creds) => self.bucket.get(&key, Some(&creds)).await,
-            Err(e) => {
-                debug!("Could not load AWS creds: {}", e);
-                self.bucket.get(&key, None).await
-            }
-        };
+        let result = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await;
 
         match result {
             Ok(data) => {
+                let data: Vec<u8> = data
+                    .body
+                    .collect()
+                    .await
+                    .context("failed reading response from s3")?
+                    .into_bytes()
+                    .into_iter()
+                    .collect();
+
                 let hit = CacheRead::from(io::Cursor::new(data))?;
                 Ok(Cache::Hit(hit))
             }
@@ -100,15 +108,12 @@ impl Storage for S3Cache {
         let start = Instant::now();
         let data = entry.finish()?;
 
-        let credentials = self
-            .provider
-            .credentials()
-            .await
-            .context("failed to get AWS credentials")?;
-
-        let bucket = self.bucket.clone();
-        let _ = bucket
-            .put(&key, data, &credentials)
+        self.client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .body(data.into())
+            .send()
             .await
             .context("failed to put cache entry in s3")?;
 

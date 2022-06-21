@@ -201,6 +201,7 @@ pub struct RedisCacheConfig {
 #[serde(deny_unknown_fields)]
 pub struct S3CacheConfig {
     pub bucket: String,
+    pub region: Option<String>,
     pub endpoint: String,
     pub use_ssl: bool,
     pub key_prefix: String,
@@ -460,6 +461,7 @@ fn config_from_env() -> EnvConfig {
                 _ => format!("{}.s3.amazonaws.com", bucket),
             },
         };
+        let region = env::var("AWS_DEFAULT_REGION").ok();
         let use_ssl = env::var("SCCACHE_S3_USE_SSL")
             .ok()
             .filter(|value| value != "off")
@@ -474,6 +476,7 @@ fn config_from_env() -> EnvConfig {
 
         S3CacheConfig {
             bucket,
+            region,
             endpoint,
             use_ssl,
             key_prefix,
@@ -1011,6 +1014,7 @@ key_prefix = "s3prefix"
                 }),
                 s3: Some(S3CacheConfig {
                     bucket: "name".to_owned(),
+                    region: None,
                     endpoint: "s3-us-east-1.amazonaws.com".to_owned(),
                     use_ssl: true,
                     key_prefix: "s3prefix".into()
