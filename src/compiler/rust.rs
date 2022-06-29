@@ -998,7 +998,7 @@ counted_array!(static ARGS: [ArgInfo<ArgData>; _] = [
     take_arg!("--out-dir", PathBuf, CanBeSeparated('='), OutDir),
     take_arg!("--pretty", OsString, CanBeSeparated('='), NotCompilation),
     take_arg!("--print", OsString, CanBeSeparated('='), NotCompilation),
-    take_arg!("--remap-path-prefix", OsString, CanBeSeparated('='), TooHard),
+    take_arg!("--remap-path-prefix", OsString, CanBeSeparated('='), PassThrough),
     take_arg!("--sysroot", PathBuf, CanBeSeparated('='), TooHardPath),
     take_arg!("--target", ArgTarget, CanBeSeparated('='), Target),
     take_arg!("--unpretty", OsString, CanBeSeparated('='), NotCompilation),
@@ -1330,6 +1330,21 @@ where
             Ok((source_files, source_hashes, env_deps))
         };
 
+        let remap_cwd = os_string_arguments
+            .iter()
+            .filter(|&(ref arg, _)| arg == "--remap-path-prefix")
+            .next()
+            .and_then(|&(_, ref val)| {
+                val.as_ref().map(|v| {
+                    let s = v.clone().into_string().unwrap();
+                    let mut parts = s.rsplitn(2, '=').map(|s| s.to_string());
+                    let to = parts.next().unwrap();
+                    let from = parts.next().unwrap();
+                    (from, to)
+                })
+            })
+            .unwrap_or_else(|| (cwd.to_str().unwrap().to_string(), "src".to_string()));
+
         // Hash the contents of the externs listed on the commandline.
         trace!("[{}]: hashing {} externs", crate_name, externs.len());
         let abs_externs = externs.iter().map(|e| cwd.join(e)).collect::<Vec<_>>();
@@ -1346,12 +1361,23 @@ where
         )?;
         // If you change any of the inputs to the hash, you should change `CACHE_VERSION`.
         let mut m = Digest::new();
+        trace!("Create hash: {:?}", m.clone().finish());
         // Hash inputs:
         // 1. A version
         m.update(CACHE_VERSION);
+        trace!(
+            "Update with version: {:?} -> {:?}",
+            CACHE_VERSION,
+            m.clone().finish()
+        );
         // 2. compiler_shlibs_digests
         for d in compiler_shlibs_digests {
             m.update(d.as_bytes());
+            trace!(
+                "Update with compiler shlibs digest: {:?} -> {:?}",
+                d,
+                m.clone().finish()
+            );
         }
         let weak_toolchain_key = m.clone().finish();
         // 3. The full commandline (self.arguments)
@@ -1376,13 +1402,31 @@ where
             sortables.sort();
             rest.into_iter()
                 .chain(sortables)
-                .flat_map(|&(ref arg, ref val)| iter::once(arg).chain(val.as_ref()))
+                .map(|&(ref arg, ref val)| {
+                    if arg == "--remap-path-prefix" {
+                        (
+                            arg.clone(),
+                            val.as_ref().and_then(|v| {
+                                v.clone()
+                                    .into_string()
+                                    .unwrap()
+                                    .rsplitn(2, '=')
+                                    .next()
+                                    .map(|s| OsString::from(s))
+                            }),
+                        )
+                    } else {
+                        (arg.clone(), val.as_ref().map(|s| s.clone()))
+                    }
+                })
+                .flat_map(|(arg, val)| iter::once(arg).chain(val))
                 .fold(OsString::new(), |mut a, b| {
                     a.push(b);
                     a
                 })
         };
         args.hash(&mut HashToDigest { digest: &mut m });
+        trace!("Update with args: {:?} -> {:?}", args, m.clone().finish());
         // 4. The digest of all source files (this includes src file from cmdline).
         // 5. The digest of all files listed on the commandline (self.externs).
         // 6. The digest of all static libraries listed on the commandline (self.staticlibs).
@@ -1392,6 +1436,7 @@ where
             .chain(staticlib_hashes)
         {
             m.update(h.as_bytes());
+            trace!("Update with source: {:?} -> {:?}", h, m.clone().finish());
         }
         // 7. Environment variables: Hash all environment variables listed in the rustc dep-info
         //    output. Additionally also has all environment variables starting with `CARGO_`,
@@ -1401,6 +1446,12 @@ where
             var.hash(&mut HashToDigest { digest: &mut m });
             m.update(b"=");
             val.hash(&mut HashToDigest { digest: &mut m });
+            trace!(
+                "Update with env deps: {:?}={:?} -> {:?}",
+                var,
+                val,
+                m.clone().finish()
+            );
         }
         let mut env_vars: Vec<_> = env_vars
             .iter()
@@ -1413,13 +1464,43 @@ where
         for &(ref var, ref val) in env_vars.iter() {
             // CARGO_MAKEFLAGS will have jobserver info which is extremely non-cacheable.
             if var.starts_with("CARGO_") && var != "CARGO_MAKEFLAGS" {
-                var.hash(&mut HashToDigest { digest: &mut m });
-                m.update(b"=");
-                val.hash(&mut HashToDigest { digest: &mut m });
+                if var == "CARGO_MANIFEST_DIR" {
+                    trace!("replacing {:?} with {:?} within {:?}", remap_cwd.0, remap_cwd.1, val);
+                    let val = val
+                        .clone()
+                        .into_string()
+                        .unwrap()
+                        .replace(&remap_cwd.0, &remap_cwd.1);
+
+                    var.hash(&mut HashToDigest { digest: &mut m });
+                    m.update(b"=");
+                    val.hash(&mut HashToDigest { digest: &mut m });
+                    trace!(
+                        "Update with cargo env vars: {:?}={:?} -> {:?}",
+                        var,
+                        val,
+                        m.clone().finish()
+                    );
+                } else {
+                    var.hash(&mut HashToDigest { digest: &mut m });
+                    m.update(b"=");
+                    val.hash(&mut HashToDigest { digest: &mut m });
+                    trace!(
+                        "Update with cargo env vars: {:?}={:?} -> {:?}",
+                        var,
+                        val,
+                        m.clone().finish()
+                    );
+                }
             }
         }
+
         // 8. The cwd of the compile. This will wind up in the rlib.
-        cwd.hash(&mut HashToDigest { digest: &mut m });
+        let cwd_fixed = cwd.clone().to_str().unwrap().replace(&remap_cwd.0, &remap_cwd.1);
+        trace!("replaced {:?} with {:?} within {:?} and got {:?}", remap_cwd.0, remap_cwd.1, cwd, cwd_fixed);
+        cwd_fixed.hash(&mut HashToDigest { digest: &mut m });
+        trace!("Update with cwd: {:?} -> {:?}", cwd_fixed, m.clone().finish());
+
         // Turn arguments into a simple Vec<OsString> to calculate outputs.
         let flat_os_string_arguments: Vec<OsString> = os_string_arguments
             .into_iter()
@@ -3422,5 +3503,86 @@ proc_macro false
         );
 
         assert_eq!(h.gcno, Some("foo-a1b6419f8321841f.gcno".into()));
+    }
+
+    #[test]
+    fn test_equal_hashes_remap_path_prefix() {
+        let f = TestFixture::new();
+        assert_eq!(
+            hash_key(
+                &f,
+                &[
+                    "--emit",
+                    "link",
+                    "foo.rs",
+                    "--out-dir",
+                    "out",
+                    "--crate-name",
+                    "foo",
+                    "--crate-type",
+                    "lib",
+                    "--remap-path-prefix",
+                    "/one=/a"
+                ],
+                &[],
+                nothing
+            ),
+            hash_key(
+                &f,
+                &[
+                    "--emit",
+                    "link",
+                    "foo.rs",
+                    "--out-dir",
+                    "out",
+                    "--crate-name",
+                    "foo",
+                    "--crate-type",
+                    "lib",
+                    "--remap-path-prefix",
+                    "/two=/a"
+                ],
+                &[],
+                nothing
+            )
+        );
+        assert_neq!(
+            hash_key(
+                &f,
+                &[
+                    "--emit",
+                    "link",
+                    "foo.rs",
+                    "--out-dir",
+                    "out",
+                    "--crate-name",
+                    "foo",
+                    "--crate-type",
+                    "lib",
+                    "--remap-path-prefix",
+                    "/one=/a"
+                ],
+                &[],
+                nothing
+            ),
+            hash_key(
+                &f,
+                &[
+                    "--emit",
+                    "link",
+                    "foo.rs",
+                    "--out-dir",
+                    "out",
+                    "--crate-name",
+                    "foo",
+                    "--crate-type",
+                    "lib",
+                    "--remap-path-prefix",
+                    "/one=/b"
+                ],
+                &[],
+                nothing
+            )
+        );
     }
 }
