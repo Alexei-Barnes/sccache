@@ -956,7 +956,6 @@ impl IntoArg for ArgTarget {
 
 ArgData! {
     TooHardFlag,
-    TooHard(OsString),
     TooHardPath(PathBuf),
     NotCompilationFlag,
     NotCompilation(OsString),
@@ -1039,7 +1038,7 @@ fn parse_arguments(arguments: &[OsString], cwd: &Path) -> CompilerArguments<Pars
     for arg in ArgsIter::new(arguments.iter().cloned(), &ARGS[..]) {
         let arg = try_or_cannot_cache!(arg, "argument parse");
         match arg.get_data() {
-            Some(TooHardFlag) | Some(TooHard(_)) | Some(TooHardPath(_)) => {
+            Some(TooHardFlag) | Some(TooHardPath(_)) => {
                 cannot_cache!(arg.flag_str().expect("Can't be Argument::Raw/UnknownFlag",))
             }
             Some(NotCompilationFlag) | Some(NotCompilation(_)) => {
@@ -1361,23 +1360,12 @@ where
         )?;
         // If you change any of the inputs to the hash, you should change `CACHE_VERSION`.
         let mut m = Digest::new();
-        trace!("Create hash: {:?}", m.clone().finish());
         // Hash inputs:
         // 1. A version
         m.update(CACHE_VERSION);
-        trace!(
-            "Update with version: {:?} -> {:?}",
-            CACHE_VERSION,
-            m.clone().finish()
-        );
         // 2. compiler_shlibs_digests
         for d in compiler_shlibs_digests {
             m.update(d.as_bytes());
-            trace!(
-                "Update with compiler shlibs digest: {:?} -> {:?}",
-                d,
-                m.clone().finish()
-            );
         }
         let weak_toolchain_key = m.clone().finish();
         // 3. The full commandline (self.arguments)
@@ -1426,7 +1414,7 @@ where
                 })
         };
         args.hash(&mut HashToDigest { digest: &mut m });
-        trace!("Update with args: {:?} -> {:?}", args, m.clone().finish());
+        trace!("[{}]: hashing args {:?}", crate_name, args);
         // 4. The digest of all source files (this includes src file from cmdline).
         // 5. The digest of all files listed on the commandline (self.externs).
         // 6. The digest of all static libraries listed on the commandline (self.staticlibs).
@@ -1436,7 +1424,6 @@ where
             .chain(staticlib_hashes)
         {
             m.update(h.as_bytes());
-            trace!("Update with source: {:?} -> {:?}", h, m.clone().finish());
         }
         // 7. Environment variables: Hash all environment variables listed in the rustc dep-info
         //    output. Additionally also has all environment variables starting with `CARGO_`,
@@ -1446,60 +1433,39 @@ where
             var.hash(&mut HashToDigest { digest: &mut m });
             m.update(b"=");
             val.hash(&mut HashToDigest { digest: &mut m });
-            trace!(
-                "Update with env deps: {:?}={:?} -> {:?}",
-                var,
-                val,
-                m.clone().finish()
-            );
         }
+
         let mut env_vars: Vec<_> = env_vars
             .iter()
             // Filter out RUSTC_COLOR since we control color usage with command line flags.
             // rustc reports an error when both are present.
             .filter(|(ref k, _)| k != "RUSTC_COLOR")
             .cloned()
+            .map(|(k, v)| {
+                if k == "CARGO_MANIFEST_DIR" {
+                    (k, v.as_os_str().replace_prefix(&remap_cwd.0, &remap_cwd.1))
+                } else {
+                    (k, v)
+                }
+            })
             .collect();
+
         env_vars.sort();
+
+        trace!("[{}]: hashing env {:#?}", crate_name, env_vars);
         for &(ref var, ref val) in env_vars.iter() {
             // CARGO_MAKEFLAGS will have jobserver info which is extremely non-cacheable.
             if var.starts_with("CARGO_") && var != "CARGO_MAKEFLAGS" {
-                if var == "CARGO_MANIFEST_DIR" {
-                    trace!("replacing {:?} with {:?} within {:?}", remap_cwd.0, remap_cwd.1, val);
-                    let val = val
-                        .clone()
-                        .into_string()
-                        .unwrap()
-                        .replace(&remap_cwd.0, &remap_cwd.1);
-
-                    var.hash(&mut HashToDigest { digest: &mut m });
-                    m.update(b"=");
-                    val.hash(&mut HashToDigest { digest: &mut m });
-                    trace!(
-                        "Update with cargo env vars: {:?}={:?} -> {:?}",
-                        var,
-                        val,
-                        m.clone().finish()
-                    );
-                } else {
-                    var.hash(&mut HashToDigest { digest: &mut m });
-                    m.update(b"=");
-                    val.hash(&mut HashToDigest { digest: &mut m });
-                    trace!(
-                        "Update with cargo env vars: {:?}={:?} -> {:?}",
-                        var,
-                        val,
-                        m.clone().finish()
-                    );
-                }
+                var.hash(&mut HashToDigest { digest: &mut m });
+                m.update(b"=");
+                val.hash(&mut HashToDigest { digest: &mut m });
             }
         }
 
         // 8. The cwd of the compile. This will wind up in the rlib.
-        let cwd_fixed = cwd.clone().to_str().unwrap().replace(&remap_cwd.0, &remap_cwd.1);
-        trace!("replaced {:?} with {:?} within {:?} and got {:?}", remap_cwd.0, remap_cwd.1, cwd, cwd_fixed);
+        let cwd_fixed = cwd.as_os_str().replace_prefix(&remap_cwd.0, &remap_cwd.1);
         cwd_fixed.hash(&mut HashToDigest { digest: &mut m });
-        trace!("Update with cwd: {:?} -> {:?}", cwd_fixed, m.clone().finish());
+        trace!("[{}]: hashing cwd {:#?}", crate_name, cwd_fixed);
 
         // Turn arguments into a simple Vec<OsString> to calculate outputs.
         let flat_os_string_arguments: Vec<OsString> = os_string_arguments

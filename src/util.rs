@@ -293,6 +293,7 @@ where
 pub trait OsStrExt {
     fn starts_with(&self, s: &str) -> bool;
     fn split_prefix(&self, s: &str) -> Option<OsString>;
+    fn replace_prefix(&self, from: &str, to: &str) -> OsString;
 }
 
 #[cfg(unix)]
@@ -310,6 +311,15 @@ impl OsStrExt for OsStr {
             Some(OsStr::from_bytes(&bytes[s.len()..]).to_owned())
         } else {
             None
+        }
+    }
+
+    fn replace_prefix(&self, from: &str, to: &str) -> OsString {
+        let bytes = self.as_bytes();
+        if bytes.starts_with(from.as_bytes()) {
+            OsStr::from_bytes(&[to.as_bytes(), &bytes[from.len()..]].concat()).to_owned()
+        } else {
+            self.to_owned()
         }
     }
 }
@@ -388,6 +398,18 @@ impl OsStrExt for OsStr {
             Some(OsString::new())
         } else {
             None
+        }
+    }
+
+    fn replace_prefix(&self, from: &str, to: &str) -> OsString {
+        if self.starts_with(from) {
+            let rest: Vec<u16> = self.encode_wide().collect();
+            let from: Vec<u16> = from.encode_utf16().collect();
+            let to: Vec<u16> = to.encode_utf16().collect();
+
+            OsString::from_wide(&[to.as_ref(), &rest[from.len()..]].concat())
+        } else {
+            self.to_owned()
         }
     }
 }
