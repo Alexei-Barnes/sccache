@@ -392,6 +392,13 @@ jobs:
           $SCCACHE_EXE --show-stats
           $SCCACHE_EXE --show-stats | grep -e "Cache hits\s*[1-9]"
 
+      - name: Compile - Preprocessing Compiler Bug
+        shell: bash
+        working-directory: ./tests/msvc-preprocessing
+        run: |
+          $SCCACHE_EXE "$(where cl.exe)" -c "@args.rsp"
+          $SCCACHE_EXE --show-stats
+
       - name: Stop Server
         if: success() || failure()
         shell: bash
