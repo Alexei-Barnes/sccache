@@ -807,6 +807,28 @@ pub fn parse_arguments(
             }
         }
     }
+    if language == Language::Cxx {
+        if let Some(obj) = outputs.get("obj") {
+            let tlh = obj.path.with_extension("tlh");
+            let tli = obj.path.with_extension("tli");
+
+            outputs.insert(
+                "tlh",
+                ArtifactDescriptor {
+                    path: tlh,
+                    optional: true,
+                },
+            );
+
+            outputs.insert(
+                "tli",
+                ArtifactDescriptor {
+                    path: tli,
+                    optional: true,
+                },
+            );
+        }
+    }
     // -Fd is not taken into account unless -Zi or -ZI are given
     // Clang is currently unable to generate PDB files
     if debug_info && !is_clang {
@@ -1395,6 +1417,72 @@ mod test {
         assert!(preprocessor_args.is_empty());
         assert!(common_args.is_empty());
         assert!(!msvc_show_includes);
+    }
+
+    #[test]
+    fn test_cpp_parse_arguments_collects_type_library_headers() {
+        let args = ovec!["-c", "foo.cpp", "-Fofoo.obj"];
+        let ParsedArguments {
+            input,
+            language,
+            outputs,
+            ..
+        } = match parse_arguments(args) {
+            CompilerArguments::Ok(args) => args,
+            o => panic!("Got unexpected parse result: {:?}", o),
+        };
+        assert_eq!(Some("foo.cpp"), input.to_str());
+        assert_eq!(Language::Cxx, language);
+        assert_map_contains!(
+            outputs,
+            (
+                "obj",
+                ArtifactDescriptor {
+                    path: PathBuf::from("foo.obj"),
+                    optional: false
+                }
+            ),
+            (
+                "tlh",
+                ArtifactDescriptor {
+                    path: PathBuf::from("foo.tlh"),
+                    optional: true
+                }
+            ),
+            (
+                "tli",
+                ArtifactDescriptor {
+                    path: PathBuf::from("foo.tli"),
+                    optional: true
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn test_c_parse_arguments_does_not_collect_type_library_headers() {
+        let args = ovec!["-c", "foo.c", "-Fofoo.obj"];
+        let ParsedArguments {
+            input,
+            language,
+            outputs,
+            ..
+        } = match parse_arguments(args) {
+            CompilerArguments::Ok(args) => args,
+            o => panic!("Got unexpected parse result: {:?}", o),
+        };
+        assert_eq!(Some("foo.c"), input.to_str());
+        assert_eq!(Language::C, language);
+        assert_map_contains!(
+            outputs,
+            (
+                "obj",
+                ArtifactDescriptor {
+                    path: PathBuf::from("foo.obj"),
+                    optional: false
+                }
+            )
+        );
     }
 
     #[test]
