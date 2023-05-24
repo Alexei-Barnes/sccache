@@ -198,19 +198,13 @@ fn test_msvc_deps(compiler: Compiler, tempdir: &Path) {
     // MSVC deps files are JSON, which we can validate properties of, but will be
     // subtly different on different systems (Windows SDK version, for example)
     let deps: serde_json::Value = serde_json::from_reader(f).expect("Failed to read dep file");
-    let source = deps[0]["Data"]["Source"]
-        .as_str()
-        .expect("Could not find source in deps file");
-    let object = tempdir
-        .join("test.o")
-        .to_str()
-        .expect("Could not get path to output file")
-        .to_owned();
-    assert_eq!(source, object);
+    let source = deps["Data"]["Source"].as_str().expect("No source found");
+    let source = Path::new(source).file_name().expect("No source file name");
+    assert_eq!(source, INPUT);
 
-    let includes = deps[0]["Data"]["Includes"]
+    let includes = deps["Data"]["Includes"]
         .as_array()
-        .expect("Could not find includes in deps file");
+        .expect("No includes found");
     assert_ne!(includes.len(), 0);
 }
 
