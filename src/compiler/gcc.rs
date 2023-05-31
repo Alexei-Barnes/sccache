@@ -17,6 +17,7 @@ use crate::compiler::c::{
     ArtifactDescriptor, CCompilerImpl, CCompilerKind, Language, ParsedArguments,
 };
 use crate::compiler::{clang, Cacheable, ColorMode, CompileCommand, CompilerArguments};
+use crate::compiler::response_file::SplitResponseFileArgs;
 use crate::mock_command::{CommandCreatorSync, RunCommand};
 use crate::util::{run_input_output, OsStrExt};
 use crate::{counted_array, dist};
@@ -865,11 +866,11 @@ impl<'a> Iterator for ExpandIncludeFile<'a> {
                 debug!("failed to read @-file `{}`: {}", file.display(), e);
                 return Some(arg);
             }
-            if contents.contains('"') || contents.contains('\'') {
-                return Some(arg);
-            }
-            let new_args = contents.split_whitespace().collect::<Vec<_>>();
-            self.stack.extend(new_args.iter().rev().map(|s| s.into()));
+            // Parse the response file contents, taking into account quote-wrapped strings and new-line separators.
+            let resp_file_args = SplitResponseFileArgs::from(&contents).collect::<Vec<_>>();
+            // Pump arguments back to the stack, in reverse order so we can `Vec::pop` and visit in original front-to-back order.
+            let rev_args = resp_file_args.iter().rev().map(|s| s.into());
+            self.stack.extend(rev_args);
         }
     }
 }
