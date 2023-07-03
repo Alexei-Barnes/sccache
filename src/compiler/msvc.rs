@@ -499,6 +499,7 @@ msvc_args!(static ARGS: [ArgInfo<ArgData>; _] = [
     msvc_flag!("external:W3", PassThrough),
     msvc_flag!("external:W4", PassThrough),
     msvc_flag!("external:anglebrackets", PassThrough),
+    msvc_flag!("fastfail", PassThrough),
     msvc_take_arg!("favor:", OsString, Concatenated, PassThroughWithSuffix),
     msvc_take_arg!("fp:", OsString, Concatenated, PassThroughWithSuffix),
     msvc_take_arg!("fsanitize-blacklist", PathBuf, Concatenated('='), ExtraHashFile),
@@ -810,9 +811,19 @@ pub fn parse_arguments(
     }
     if language == Language::Cxx {
         if let Some(obj) = outputs.get("obj") {
+            // MSVC can produce "type library headers"[1], with the extensions "tlh" and "tli".
+            // These files can be used in later compilation steps to interact with COM interfaces.
+            //
+            // These files are only created when the `#import` directive is used.
+            // Figuring out if an import directive is used would require parsing C++, which would be a lot of work.
+            // To avoid that problem, we just optionally cache these headers if they happen to be produced.
+            // This isn't perfect, but it is easy!
+            //
+            // [1]: https://learn.microsoft.com/en-us/cpp/preprocessor/hash-import-directive-cpp?view=msvc-170#_predir_the_23import_directive_header_files_created_by_import
             let tlh = obj.path.with_extension("tlh");
             let tli = obj.path.with_extension("tli");
 
+            // Primary type library header
             outputs.insert(
                 "tlh",
                 ArtifactDescriptor {
@@ -821,6 +832,7 @@ pub fn parse_arguments(
                 },
             );
 
+            // Secondary type library header
             outputs.insert(
                 "tli",
                 ArtifactDescriptor {
